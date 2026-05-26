@@ -14,7 +14,7 @@ class IT8951(WaveshareEPD):
     This class will automatically infer the width and height by querying the
     controller."""
 
-    VCOM = 2000
+    VCOM = 2810
 
     CMD_GET_DEVICE_INFO = [0x03, 0x02]
     CMD_WRITE_REGISTER = [0x00, 0x11]

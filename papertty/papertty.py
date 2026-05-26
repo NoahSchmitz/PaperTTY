@@ -230,6 +230,8 @@ class PaperTTY:
         # 1000 M's because oblique fonts a complicated.
         ll, tt, rr, bb = font.getbbox('M')
         #ww = (((rr * 1000) - (ll * 1000)) // 1000)
+        self.font_width = int(round(font.getlength('M'))) if hasattr(font, 'getlength') else (rr - ll)
+        
         hh = bb - tt
         self.font_height = hh 
         if 'getmetrics' in dir(font):
@@ -247,6 +249,8 @@ class PaperTTY:
             # characters seem to have the same height
             ll, tt, rr, bb = font.getbbox('A')
             #ww = (((rr * 1000) - (ll * 1000)) // 1000)
+            self.font_width = int(round(font.getlength('A'))) if hasattr(font, 'getlength') else (rr - ll)
+            
             hh = bb - tt
             self.font_height = hh + self.spacing
 
@@ -266,7 +270,7 @@ class PaperTTY:
 
     def draw_line_cursor(self, cursor, draw):
         cur_x, cur_y = cursor[0], cursor[1]
-        width = self.font_width
+        width = self.font_width if isinstance(self.font_width, int) else 4
         # desired cursor width
         cur_width = width - 1
         # get font height
@@ -428,11 +432,33 @@ class PaperTTY:
             # Split the text up by line and display each line individually.
             # This is a workaround for a font height bug in PIL
             lines = text.split('\n')
+            
+            # Slice our attributes to match the text lines
+            inv_lines = self.split(self.inverts, self.cols) if hasattr(self, 'inverts') and self.cols else []
+            und_lines = self.split(self.underlines, self.cols) if hasattr(self, 'underlines') and self.cols else []
+            
             for i, line in enumerate(lines):
                 if line:
                     y = i * self.font_height
                     draw.text((0, y), line, font=self.font, fill=fill, spacing=self.spacing)
-
+                    
+                    # Apply Underlines for hotkeys
+                    if i < len(und_lines) and '1' in und_lines[i]:
+                        for k, char in enumerate(und_lines[i]):
+                            if char == '1':
+                                char_x = k * self.font_width
+                                draw.line((char_x, y + self.font_height - 2, char_x + self.font_width - 1, y + self.font_height - 2), fill=self.black, width=2)
+                                
+                    # Apply Reverse-Video for menus
+                    if i < len(inv_lines) and '1' in inv_lines[i]:
+                        mask = Image.new('1', image.size, self.black)
+                        mask_draw = ImageDraw.Draw(mask)
+                        for k, char in enumerate(inv_lines[i]):
+                            if char == '1':
+                                char_x = k * self.font_width
+                                mask_draw.rectangle([char_x, y, char_x + self.font_width, y + self.font_height], fill=self.white)
+                        image = ImageChops.logical_xor(image, mask)
+                        draw = ImageDraw.Draw(image) # Rebind draw object!
             # if we want a cursor, draw it - the most convoluted part
             if cursor and self.cursor:
                 if self.cursor == 'block':
@@ -604,47 +630,50 @@ class PaperTTY:
 
         #List of lines of text which have changed
         changedLines = []
+        # Split attribute strings by columns
+        inv_lines = self.split(self.inverts, self.cols) if hasattr(self, 'inverts') else []
+        old_inv_lines = self.split(self.old_inverts, self.cols) if hasattr(self, 'old_inverts') else []
+        und_lines = self.split(self.underlines, self.cols) if hasattr(self, 'underlines') else []
+        old_und_lines = self.split(self.old_underlines, self.cols) if hasattr(self, 'old_underlines') else []
 
         for i in range(self.rows):
-            
             newval = newlines[i] if i < len(newlines) else ''
             oldval = oldlines[i] if i < len(oldlines) else ''
+            
+            new_inv = inv_lines[i] if i < len(inv_lines) else ''
+            old_inv = old_inv_lines[i] if i < len(old_inv_lines) else ''
+            new_und = und_lines[i] if i < len(und_lines) else ''
+            old_und = old_und_lines[i] if i < len(old_und_lines) else ''
 
-            #Use these variables to check if the cursor has moved
             cursorIsOnThisLine = False
             cursorWasOnThisLine = False
             cursorMovedHorizontally = False
 
             if cursor and self.cursor:
-                cur_y = cursor[1]
-                if cur_y == i:
-                    cursorIsOnThisLine = True
-
+                if cursor[1] == i: cursorIsOnThisLine = True
             if oldcursor:
-                cur_y = oldcursor[1]
-                if cur_y == i:
-                    cursorWasOnThisLine = True
+                if oldcursor[1] == i: cursorWasOnThisLine = True
 
-            #If the cursor was on this line last render, and it's still on this line
-            #this render, then we need to check the x axis (cursor[0]) and the text
-            #to judge whether the cursor needs drawing or not.
-            #If it doesn't need drawing, set both variables to false.
             if cursorIsOnThisLine and cursorWasOnThisLine:
                 if oldcursor[0] != cursor[0]:
                     cursorMovedHorizontally = True
-                elif oldval == newval:
+                elif oldval == newval and old_inv == new_inv and old_und == new_und:
                     cursorIsOnThisLine = False
                     cursorWasOnThisLine = False
 
-            #Draw this line if either the cursor has moved, or the text has changed
-            drawThisLine = cursorMovedHorizontally or cursorIsOnThisLine != cursorWasOnThisLine or oldval != newval
+            # Draw if text OR colors change
+            drawThisLine = cursorMovedHorizontally or cursorIsOnThisLine != cursorWasOnThisLine or oldval != newval or old_inv != new_inv or old_und != new_und
 
             lineToDraw = {
-                "drawThisLine":drawThisLine,
-                "newval":newval,
-                "cursorIsOnThisLine":cursorIsOnThisLine,
-                "oldval":oldval,
-                "cursorWasOnThisLine":cursorWasOnThisLine
+                "drawThisLine": drawThisLine,
+                "newval": newval,
+                "new_inv": new_inv,
+                "new_und": new_und,
+                "old_inv": old_inv,
+                "old_und": old_und,
+                "cursorIsOnThisLine": cursorIsOnThisLine,
+                "oldval": oldval,
+                "cursorWasOnThisLine": cursorWasOnThisLine
             }
             changedLines.append(lineToDraw)
 
@@ -805,9 +834,9 @@ class PaperTTY:
                     firstChanged = 0
                 else:
                     for j in range(smallerLen):
-                        oldChar = oldval[j]
-                        newChar = newval[j]
-                        if oldChar != newChar:
+                        if (oldval[j] != newval[j] or 
+                            (j < len(arr["old_inv"]) and arr["old_inv"][j] != arr["new_inv"][j]) or 
+                            (j < len(arr["old_und"]) and arr["old_und"][j] != arr["new_und"][j])):
                             firstChanged = j
                             break
 
@@ -826,9 +855,9 @@ class PaperTTY:
                     lastChanged = max(oldlen, newlen) - 1
                 else:
                     for j in range(newlen):
-                        oldChar = oldval[j]
-                        newChar = newval[j]
-                        if oldChar != newChar:
+                        if (oldval[j] != newval[j] or 
+                            (j < len(arr["old_inv"]) and arr["old_inv"][j] != arr["new_inv"][j]) or 
+                            (j < len(arr["old_und"]) and arr["old_und"][j] != arr["new_und"][j])):
                             lastChanged = j
 
                 #Set the x coordinate to start at `firstChanged` since we won't draw
@@ -845,6 +874,8 @@ class PaperTTY:
                     "x":x,
                     "y":y,
                     "newval":newval,
+                    "new_inv":arr["new_inv"],
+                    "new_und":arr["new_und"],
                     "cursorIsOnThisLine":cursorIsOnThisLine,
                     "subsequentLines":subsequentLines,
                     "firstChanged":firstChanged,
@@ -893,10 +924,13 @@ class PaperTTY:
             smallest_x = smallestStartIndex * self.font_width
             biggest_x = biggestEndIndex * self.font_width
 
-            #For each text chunk, reduce its length based on the chars we want to draw.
+            # For each text chunk, reduce its length based on the chars we want to draw.
             for chunk in chunks:
                 chunk["newval"] = chunk["newval"][smallestStartIndex:biggestEndIndex+1]
-
+                if "new_inv" in chunk:
+                    chunk["new_inv"] = chunk["new_inv"][smallestStartIndex:biggestEndIndex+1]
+                if "new_und" in chunk:
+                    chunk["new_und"] = chunk["new_und"][smallestStartIndex:biggestEndIndex+1]
             #Calculate the image width based on how many chars have changed.
             #eg. If the text changed from "test" to "testing", then 3 chars have changed.
             #So the image width will be 3 x font_width.
@@ -1025,20 +1059,38 @@ class PaperTTY:
             x = 0
             y = j * height
             newval = chunk["newval"]
+            new_inv = chunk.get("new_inv", "")
+            new_und = chunk.get("new_und", "")
             cursorIsOnThisLine = chunk["cursorIsOnThisLine"]
 
             draw.text((x, y), newval, font=self.font, fill=fill, spacing=self.spacing)
 
-            #Draw the cursor, if it's on this line
-            if cursorIsOnThisLine:
+            # Draw Underlines for colored/bold shortcut keys
+            for k, char in enumerate(new_und):
+                if char == '1':
+                    char_x = k * self.font_width
+                    # Draw a 2px thick line near the bottom
+                    draw.line((char_x, y + height - 2, char_x + self.font_width - 1, y + height - 2), fill=self.black, width=2)
 
-                #Adjust cursor's coordinate so they're relative to the text chunk's position
+            # Invert cells with background colors (menus and tabs)
+            if '1' in new_inv:
+                mask = Image.new('1', image.size, self.black)
+                mask_draw = ImageDraw.Draw(mask)
+                for k, char in enumerate(new_inv):
+                    if char == '1':
+                        char_x = k * self.font_width
+                        mask_draw.rectangle([char_x, y, char_x + self.font_width, y + height], fill=self.white)
+                image = ImageChops.logical_xor(image, mask)
+                draw = ImageDraw.Draw(image) # Crucial: Rebind draw object!
+
+            # Draw the hardware cursor, if it's on this line
+            if cursorIsOnThisLine:
                 cursor_x = cursor[0] - smallestStartIndex
                 cursor_y = j
-                
                 newcursor = (cursor_x, cursor_y, cursor[2])
                 if self.cursor == 'block':
                     image = self.draw_block_cursor(newcursor, image)
+                    draw = ImageDraw.Draw(image)
                 else:
                     self.draw_line_cursor(newcursor, draw)
 
@@ -1487,9 +1539,24 @@ def terminal(settings, vcsa, font, fontsize, noclear, nocursor, cursor, sleep, t
                     # read the first 4 bytes to get the console attributes
                     attributes = f.read(4)
                     rows, cols, x, y = list(map(ord, struct.unpack('cccc', attributes)))
+                    
+                    ptty.cols = cols
+                    ptty.rows = rows
+                    
+                    # Read attribute bytes (every second byte in vcsa)
+                    attr_bytes = f.read(rows * cols * 2)[1::2]
+                    
+                    # If background color > 0, flag for inversion
+                    ptty.inverts = ''.join(['1' if (a >> 4) & 0x0F != 0 else '0' for a in attr_bytes])
+                    # If foreground is not default gray (0x07) or black (0x00), flag for underline
+                    ptty.underlines = ''.join(['1' if (a & 0x0F) not in (0x00, 0x07) else '0' for a in attr_bytes])
+                    
+                    if not hasattr(ptty, 'old_inverts'): ptty.old_inverts = ptty.inverts
+                    if not hasattr(ptty, 'old_underlines'): ptty.old_underlines = ptty.underlines
 
                     # read from the text buffer 
                     buff = vcsu.read()
+                    
                     if character_width == 4:
                         # work around weird bug
                         buff = buff.replace(b'\x20\x20\x20\x20', b'\x20\x00\x00\x00')
@@ -1500,8 +1567,7 @@ def terminal(settings, vcsa, font, fontsize, noclear, nocursor, cursor, sleep, t
                     # add newlines per column count
                     buff = ''.join([r.decode(encoding, 'replace') + '\n' for r in ptty.split(buff, cols * character_width)])
                     # do something only if content has changed or cursor was moved
-                    if buff != oldbuff or cursor != oldcursor:
-                        # show new content
+                    if buff != oldbuff or cursor != oldcursor or ptty.inverts != ptty.old_inverts or ptty.underlines != ptty.old_underlines:
                         oldimage = ptty.showtext(buff, fill=ptty.black, cursor=cursor if not nocursor else None,
                                                 oldimage=oldimage,
                                                 oldtext=oldbuff,
@@ -1509,6 +1575,8 @@ def terminal(settings, vcsa, font, fontsize, noclear, nocursor, cursor, sleep, t
                                                 **textargs)
                         oldbuff = buff
                         oldcursor = cursor
+                        ptty.old_inverts = ptty.inverts
+                        ptty.old_underlines = ptty.underlines
                     else:
                         # delay before next update check
                         time.sleep(float(sleep))
