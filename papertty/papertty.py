@@ -268,30 +268,21 @@ class PaperTTY:
         ph = self.driver.height
         return int((pw if portrait else ph) / width), int((ph if portrait else pw) / height)
 
-    def draw_line_cursor(self, cursor, draw):
-        cur_x, cur_y = cursor[0], cursor[1]
+    def draw_line_cursor(self, pixel_x, cur_y, draw):
         width = self.font_width if isinstance(self.font_width, int) else 4
-        # desired cursor width
         cur_width = width - 1
-        # get font height
         height = self.font_height
-        # starting X is the font width times current column
-        start_x = cur_x * width
         offset = 0
-        if self.cursor != 'default': # only default and a number are valid in this context
+        if self.cursor != 'default': 
             offset = int(self.cursor)
-        # add 1 because rows start at 0 and we want the cursor at the bottom
         start_y = (cur_y + 1) * height - 1 - offset
-        # draw the cursor line
-        draw.line((start_x, start_y, start_x + cur_width, start_y), fill=self.black)
+        draw.line((pixel_x, start_y, pixel_x + cur_width, start_y), fill=self.black)
 
-    def draw_block_cursor(self, cursor, image):
-        cur_x, cur_y = cursor[0], cursor[1]
+    def draw_block_cursor(self, pixel_x, cur_y, image):
         width = self.font_width
-        # get font height
         height = self.font_height
-        upper_left = (cur_x * width, cur_y * height)
-        lower_right = ((cur_x + 1) * width, (cur_y + 1) * height)
+        upper_left = (pixel_x, cur_y * height)
+        lower_right = (pixel_x + width - 1, (cur_y + 1) * height - 1)
         mask = Image.new('1', (image.width, image.height), self.black)
         draw = ImageDraw.Draw(mask)
         draw.rectangle([upper_left, lower_right], fill=self.white)
@@ -416,7 +407,6 @@ class PaperTTY:
             #If partial updates are supported, run partialdraw_showtext() instead
             #as it should be more efficient.
             if self.driver.supports_partial and self.partial:
-                
                 if oldtext is None:
                     oldtext = ""
 
@@ -429,42 +419,67 @@ class PaperTTY:
             # create the Draw object and draw the text
             draw = ImageDraw.Draw(image)
 
-            # Split the text up by line and display each line individually.
             # This is a workaround for a font height bug in PIL
+            # Split the text up by line and display each line individually.
             lines = text.split('\n')
             
             # Slice our attributes to match the text lines
             inv_lines = self.split(self.inverts, self.cols) if hasattr(self, 'inverts') and self.cols else []
             und_lines = self.split(self.underlines, self.cols) if hasattr(self, 'underlines') and self.cols else []
             
+            # OPTIMIZATION: Helper to find contiguous blocks of '1's
+            def get_blocks(attr_str):
+                blocks = []
+                in_block = False
+                start = 0
+                for idx, char in enumerate(attr_str):
+                    if char == '1' and not in_block:
+                        start = idx
+                        in_block = True
+                    elif char == '0' and in_block:
+                        blocks.append((start, idx))
+                        in_block = False
+                if in_block:
+                    blocks.append((start, len(attr_str)))
+                return blocks
+
             for i, line in enumerate(lines):
                 if line:
                     y = i * self.font_height
-                    draw.text((0, y), line, font=self.font, fill=fill, spacing=self.spacing)
+                    draw.text((0,y), line, font=self.font, fill=fill, spacing=self.spacing)
                     
-                    # Apply Underlines for hotkeys
+                    # Apply Underlines for hotkeys using fast block math
                     if i < len(und_lines) and '1' in und_lines[i]:
-                        for k, char in enumerate(und_lines[i]):
-                            if char == '1':
-                                char_x = k * self.font_width
-                                draw.line((char_x, y + self.font_height - 2, char_x + self.font_width - 1, y + self.font_height - 2), fill=self.black, width=2)
+                        for start, end in get_blocks(und_lines[i]):
+                            start_px = int(round(self.font.getlength(line[:start]))) if hasattr(self.font, 'getlength') else start * self.font_width
+                            end_px = int(round(self.font.getlength(line[:end]))) if hasattr(self.font, 'getlength') else end * self.font_width
+                            draw.line((start_px, y + self.font_height - 2, end_px - 1, y + self.font_height - 2), fill=self.black, width=2)
                                 
-                    # Apply Reverse-Video for menus
+                    # Apply Reverse-Video for menus using fast block math
                     if i < len(inv_lines) and '1' in inv_lines[i]:
                         mask = Image.new('1', image.size, self.black)
                         mask_draw = ImageDraw.Draw(mask)
-                        for k, char in enumerate(inv_lines[i]):
-                            if char == '1':
-                                char_x = k * self.font_width
-                                mask_draw.rectangle([char_x, y, char_x + self.font_width, y + self.font_height], fill=self.white)
+                        for start, end in get_blocks(inv_lines[i]):
+                            start_px = int(round(self.font.getlength(line[:start]))) if hasattr(self.font, 'getlength') else start * self.font_width
+                            end_px = int(round(self.font.getlength(line[:end]))) if hasattr(self.font, 'getlength') else end * self.font_width
+                            mask_draw.rectangle([start_px, y, end_px - 1, y + self.font_height - 1], fill=self.white)
+                        
                         image = ImageChops.logical_xor(image, mask)
                         draw = ImageDraw.Draw(image) # Rebind draw object!
-            # if we want a cursor, draw it - the most convoluted part
+
+            # if we want a cursor, draw it
             if cursor and self.cursor:
+                cursor_col = cursor[0]
+                cursor_y = cursor[1]
+                line_text = lines[cursor_y] if cursor_y < len(lines) else ""
+                
+                cursor_px = int(round(self.font.getlength(line_text[:cursor_col]))) if hasattr(self.font, 'getlength') else cursor_col * self.font_width
+                
                 if self.cursor == 'block':
-                    image = self.draw_block_cursor(cursor, image)
+                    image = self.draw_block_cursor(cursor_px, cursor_y, image)
                 else:
-                    self.draw_line_cursor(cursor, draw)
+                    self.draw_line_cursor(cursor_px, cursor_y, draw)
+                    
             # rotate image if using landscape
             if not portrait:
                 image = image.rotate(90, expand=True)
@@ -899,83 +914,32 @@ class PaperTTY:
         return linesToDraw
 
     def partialdraw_get_images_to_draw(self, linesToDraw, cursor, oldcursor, height, fill, flipx, flipy, driverWidth):
-
-        """This function takes the result of partialdraw_get_lines_to_draw and turns
-            each line into an image. It takes care of rotation, adjusting the
-            coordinates, and so on."""
-
-        #List of images (lines of text) to draw
         imagesToDraw = []
         
         for i, arr in enumerate(linesToDraw):
-
-            #Grab the current line and subsequent lines, then put them all in a list together
             chunks = [arr]
             for line in arr["subsequentLines"]:
                 chunks.append(line)
 
-            #Run the chunks of text through the partialdraw_get_indexes_from_chunks function.
-            #This will tell us the first and last character indexes to draw.
-            #TODO: if the font isn't monospace, this should just cover the entire line
-            (smallestStartIndex, biggestEndIndex) = self.partialdraw_get_indexes_from_chunks(chunks, cursor, oldcursor)
+            # OPTIMIZATION: Update the full width of the screen.
+            # This completely eliminates ghosting on backspace/deletes and prevents right-side clipping.
+            rowWidth = driverWidth
+            rowHeight = height * len(chunks)
 
-            #Calculate the starting x coordinate (smallest_x) and the ending x coordinate
-            #(biggest_x) of the block.
-            smallest_x = smallestStartIndex * self.font_width
-            biggest_x = biggestEndIndex * self.font_width
+            # Draw the image
+            image = self.partialdraw_build_image(rowWidth, rowHeight, chunks, height, fill, cursor)
 
-            # For each text chunk, reduce its length based on the chars we want to draw.
-            for chunk in chunks:
-                chunk["newval"] = chunk["newval"][smallestStartIndex:biggestEndIndex+1]
-                if "new_inv" in chunk:
-                    chunk["new_inv"] = chunk["new_inv"][smallestStartIndex:biggestEndIndex+1]
-                if "new_und" in chunk:
-                    chunk["new_und"] = chunk["new_und"][smallestStartIndex:biggestEndIndex+1]
-            #Calculate the image width based on how many chars have changed.
-            #eg. If the text changed from "test" to "testing", then 3 chars have changed.
-            #So the image width will be 3 x font_width.
-            diffIndex = biggestEndIndex - smallestStartIndex
-            diffRows = diffIndex + 1
-            rowWidth = diffRows * self.font_width
-
-            #Line height doesn't change based on orientation, since image.rotate will
-            #resize as needed.
-            lineHeight = height
-
-            #Calculate the row height by multiplying the line height by the number of chunks
-            rowHeight = lineHeight * len(chunks)
-
-            #Draw the image
-            image = self.partialdraw_build_image(rowWidth, rowHeight, chunks, height, fill, cursor, smallestStartIndex)
-
-            #Flip the image, if needed.
-            #But do NOT rotate it here.
-            #Rotation is handled later in the process to simplify coordinate translation.
             if flipx:
                 image = image.transpose(Image.FLIP_LEFT_RIGHT)
             if flipy:
                 image = image.transpose(Image.FLIP_TOP_BOTTOM)
             
-            #Figure out where to draw the image based on either the first or last
-            #chunk's coordinates
-            if flipy:
-                chunk = chunks[-1]
-            else:
-                chunk = chunks[0]
+            chunk = chunks[-1] if flipy else chunks[0]
 
-            offset_x = 0 #driverWidth % self.font_width
+            # Since we are drawing the full width, x is always 0
+            x = 0
             y = chunk["y"]
 
-            #smallest_x is the x coordinate of the start of the changed area.
-            #So set x to be smallest_x if flipx is turned off.
-            #If flipx is turned on, then calculate the x coordinate based on
-            #the panel width, image width, etc.
-            if flipx:
-                x = driverWidth - image.width + offset_x - smallest_x
-            else:
-                x = smallest_x
-
-            #Add this image to the list of images to draw
             imagesToDraw.append({"x":x, "y":y, "image":image})
 
         return imagesToDraw
@@ -1040,21 +1004,29 @@ class PaperTTY:
 
         return (smallestStartIndex, biggestEndIndex)
 
-    def partialdraw_build_image(self, rowWidth, rowHeight, chunks, height, fill, cursor, smallestStartIndex):
-
+    def partialdraw_build_image(self, rowWidth, rowHeight, chunks, height, fill, cursor):
         """Builds an image based on the chunks of text and size parameters passed in.
             Also draws the cursor, if needed."""
 
-
-        #First, create an image with the expected dimensions.
         image = Image.new('1', (rowWidth, rowHeight), self.white)
-
-
-        #Then get the ImageDraw object so we can actually draw on the image.
         draw = ImageDraw.Draw(image)
 
+        # OPTIMIZATION: Helper to find contiguous blocks of '1's
+        def get_blocks(attr_str):
+            blocks = []
+            in_block = False
+            start = 0
+            for idx, char in enumerate(attr_str):
+                if char == '1' and not in_block:
+                    start = idx
+                    in_block = True
+                elif char == '0' and in_block:
+                    blocks.append((start, idx))
+                    in_block = False
+            if in_block:
+                blocks.append((start, len(attr_str)))
+            return blocks
 
-        #For each chunk, draw the text and possibly the cursor
         for j, chunk in enumerate(chunks):
             x = 0
             y = j * height
@@ -1063,37 +1035,42 @@ class PaperTTY:
             new_und = chunk.get("new_und", "")
             cursorIsOnThisLine = chunk["cursorIsOnThisLine"]
 
-            draw.text((x, y), newval, font=self.font, fill=fill, spacing=self.spacing)
-
+            # FAST Native rendering
+            draw.text((x,y), newval, font=self.font, fill=fill, spacing=self.spacing)
+            
             # Draw Underlines for colored/bold shortcut keys
-            for k, char in enumerate(new_und):
-                if char == '1':
-                    char_x = k * self.font_width
-                    # Draw a 2px thick line near the bottom
-                    draw.line((char_x, y + height - 2, char_x + self.font_width - 1, y + height - 2), fill=self.black, width=2)
+            if '1' in new_und:
+                for start, end in get_blocks(new_und):
+                    start_px = int(round(self.font.getlength(newval[:start]))) if hasattr(self.font, 'getlength') else start * self.font_width
+                    end_px = int(round(self.font.getlength(newval[:end]))) if hasattr(self.font, 'getlength') else end * self.font_width
+                    draw.line((start_px, y + height - 2, end_px - 1, y + height - 2), fill=self.black, width=2)
 
             # Invert cells with background colors (menus and tabs)
             if '1' in new_inv:
                 mask = Image.new('1', image.size, self.black)
                 mask_draw = ImageDraw.Draw(mask)
-                for k, char in enumerate(new_inv):
-                    if char == '1':
-                        char_x = k * self.font_width
-                        mask_draw.rectangle([char_x, y, char_x + self.font_width, y + height], fill=self.white)
+                for start, end in get_blocks(new_inv):
+                    start_px = int(round(self.font.getlength(newval[:start]))) if hasattr(self.font, 'getlength') else start * self.font_width
+                    end_px = int(round(self.font.getlength(newval[:end]))) if hasattr(self.font, 'getlength') else end * self.font_width
+                    mask_draw.rectangle([start_px, y, end_px - 1, y + height - 1], fill=self.white)
+            
                 image = ImageChops.logical_xor(image, mask)
                 draw = ImageDraw.Draw(image) # Crucial: Rebind draw object!
-
-            # Draw the hardware cursor, if it's on this line
-            if cursorIsOnThisLine:
-                cursor_x = cursor[0] - smallestStartIndex
+                
+        # Draw the hardware cursor AFTER the XOR so it doesn't get double-inverted
+        for j, chunk in enumerate(chunks):
+            if chunk["cursorIsOnThisLine"]:
+                cursor_col = cursor[0]
+                text_before_cursor = chunk["newval"][:cursor_col]
+                pixel_x = int(round(self.font.getlength(text_before_cursor))) if hasattr(self.font, 'getlength') else cursor_col * self.font_width
+                
                 cursor_y = j
-                newcursor = (cursor_x, cursor_y, cursor[2])
                 if self.cursor == 'block':
-                    image = self.draw_block_cursor(newcursor, image)
+                    image = self.draw_block_cursor(pixel_x, cursor_y, image)
                     draw = ImageDraw.Draw(image)
                 else:
-                    self.draw_line_cursor(newcursor, draw)
-
+                    self.draw_line_cursor(pixel_x, cursor_y, draw)
+                    
         return image
 
     def clear(self):
@@ -1451,6 +1428,7 @@ def terminal(settings, vcsa, font, fontsize, noclear, nocursor, cursor, sleep, t
         else:
             print("Started displaying {}, minimum update interval {} s, exit with Ctrl-C".format(vcsa, sleep))
         character_width, vcsudev = ptty.vcsudev(vcsa)
+
         while True:
             if flags['show_menu']:
                 flags['show_menu'] = False
@@ -1528,7 +1506,9 @@ def terminal(settings, vcsa, font, fontsize, noclear, nocursor, cursor, sleep, t
 
             # if user or SIGUSR1 toggled the scrub flag, scrub display and start with a fresh image
             if flags['scrub_requested']:
-                ptty.driver.scrub()
+                # ptty.driver.scrub()
+                # Replacing the above with below for a faster "refresh" that I can trigger while running as a service, and hopefully avoid scrub not covering the whole vertical of the 6" HD screen
+                ptty.clear()
                 # clear old image and buffer and restore flag
                 oldimage = None
                 oldbuff = ''
@@ -1553,7 +1533,7 @@ def terminal(settings, vcsa, font, fontsize, noclear, nocursor, cursor, sleep, t
                     
                     if not hasattr(ptty, 'old_inverts'): ptty.old_inverts = ptty.inverts
                     if not hasattr(ptty, 'old_underlines'): ptty.old_underlines = ptty.underlines
-
+        
                     # read from the text buffer 
                     buff = vcsu.read()
                     
@@ -1577,11 +1557,10 @@ def terminal(settings, vcsa, font, fontsize, noclear, nocursor, cursor, sleep, t
                         oldcursor = cursor
                         ptty.old_inverts = ptty.inverts
                         ptty.old_underlines = ptty.underlines
-                    else:
-                        # delay before next update check
-                        time.sleep(float(sleep))
+                # delay before next update check
+                time.sleep(float(sleep))
 
-
+    
 # add all the CLI commands
 cli.add_command(scrub)
 cli.add_command(terminal)
