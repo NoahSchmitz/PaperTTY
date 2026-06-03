@@ -336,12 +336,16 @@ class PaperTTY:
                             end_px = int(round(self.font.getlength(line[:end])))
                             draw.line((start_px, y + self.font_height - 2, end_px - 1, y + self.font_height - 2), fill=self.black, width=2)
 
-                    # GREEN: Strikethrough
+                    # GREEN: Dotted Underline
                     if i < len(green_lines) and True in green_lines[i]:
                         for start, end in PaperTTY.get_blocks(green_lines[i], line):
                             start_px = int(round(self.font.getlength(line[:start])))
                             end_px = int(round(self.font.getlength(line[:end])))
-                            draw.line((start_px, y + (self.font_height // 2), end_px - 1, y + (self.font_height // 2)), fill=self.black, width=1)
+                            
+                            # Draw a dot every 2 pixels along the baseline
+                            baseline_y = y + self.font_height - 2
+                            for dot_x in range(start_px, end_px, 2):
+                                draw.point((dot_x, baseline_y), fill=self.black)
 
                     # RED: "Fake Bold" 
                     if i < len(red_lines) and True in red_lines[i]:
@@ -946,13 +950,16 @@ class PaperTTY:
                     end_px = int(round(self.font.getlength(newval[:end])))
                     draw.line((start_px, y + height - 2, end_px - 1, y + height - 2), fill=self.black, width=2)
 
-            # GREEN: Strikethrough (or double underline)
+            # GREEN: Dotted Underline
             if True in chunk.get("new_green", ()):
                 for start, end in PaperTTY.get_blocks(chunk["new_green"], newval):
                     start_px = int(round(self.font.getlength(newval[:start])))
                     end_px = int(round(self.font.getlength(newval[:end])))
-                    # Draw line through the middle of the text
-                    draw.line((start_px, y + (height // 2), end_px - 1, y + (height // 2)), fill=self.black, width=1)
+                    
+                    # Draw a dot every 2 pixels along the baseline
+                    baseline_y = y + height - 2
+                    for dot_x in range(start_px, end_px, 2):
+                        draw.point((dot_x, baseline_y), fill=self.black)
 
             # RED: "Fake Bold" (Overdraw shifted by 1px)
             if True in chunk.get("new_red", ()):
