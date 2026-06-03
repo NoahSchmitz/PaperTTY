@@ -193,18 +193,22 @@ class PaperTTY:
         return True
 
     @staticmethod
-    def get_blocks(attr_sequence):
-        """OPTIMIZATION: Helper to find contiguous blocks of True values in a sequence"""
+    def get_blocks(attr_sequence, text_sequence=None):
+        """Helper to find contiguous blocks of True values, ignoring spaces."""
         blocks = []
         in_block = False
         start = 0
         for idx, is_active in enumerate(attr_sequence):
-            if is_active and not in_block:
+            # If text is provided, ensure the character is not a space
+            valid_char = True if not text_sequence else text_sequence[idx] != ' '
+            
+            if is_active and valid_char and not in_block:
                 start = idx
                 in_block = True
-            elif not is_active and in_block:
+            elif (not is_active or not valid_char) and in_block:
                 blocks.append((start, idx))
                 in_block = False
+                
         if in_block:
             blocks.append((start, len(attr_sequence)))
         return blocks
@@ -324,7 +328,7 @@ class PaperTTY:
                     
                     # Apply Underlines for hotkeys using fast block math
                     if i < len(und_lines) and '1' in und_lines[i]:
-                        for start, end in PaperTTY.get_blocks(und_lines[i]):
+                        for start, end in PaperTTY.get_blocks(und_lines[i], line):
                             start_px = int(round(self.font.getlength(line[:start]))) if hasattr(self.font, 'getlength') else start * self.font_width
                             end_px = int(round(self.font.getlength(line[:end]))) if hasattr(self.font, 'getlength') else end * self.font_width
                             draw.line((start_px, y + self.font_height - 2, end_px - 1, y + self.font_height - 2), fill=self.black, width=2)
@@ -904,7 +908,7 @@ class PaperTTY:
             
             # Draw Underlines for colored/bold shortcut keys
             if True in new_und:
-                for start, end in PaperTTY.get_blocks(new_und):
+                for start, end in PaperTTY.get_blocks(new_und, newval):
                     start_px = int(round(self.font.getlength(newval[:start]))) if hasattr(self.font, 'getlength') else start * self.font_width
                     end_px = int(round(self.font.getlength(newval[:end]))) if hasattr(self.font, 'getlength') else end * self.font_width
                     draw.line((start_px, y + height - 2, end_px - 1, y + height - 2), fill=self.black, width=2)
