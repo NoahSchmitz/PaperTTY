@@ -192,6 +192,23 @@ class PaperTTY:
             print("No write access to {} so cannot set terminal size, maybe run with sudo?".format(tty))
         return True
 
+    @staticmethod
+    def get_blocks(attr_sequence):
+        """OPTIMIZATION: Helper to find contiguous blocks of True values in a sequence"""
+        blocks = []
+        in_block = False
+        start = 0
+        for idx, is_active in enumerate(attr_sequence):
+            if is_active and not in_block:
+                start = idx
+                in_block = True
+            elif not is_active and in_block:
+                blocks.append((start, idx))
+                in_block = False
+        if in_block:
+            blocks.append((start, len(attr_sequence)))
+        return blocks
+    
     def load_font(self, path, keep_if_not_found=False):
         """Load the PIL or TrueType font"""
         font = None
@@ -226,34 +243,21 @@ class PaperTTY:
 
     def recalculate_font(self, font):
         """Load the PIL or TrueType font"""
-        # get physical dimensions of font. Take the average width of
-        # 1000 M's because oblique fonts a complicated.
-        ll, tt, rr, bb = font.getbbox('M')
-        #ww = (((rr * 1000) - (ll * 1000)) // 1000)
-        self.font_width = int(round(font.getlength('M'))) if hasattr(font, 'getlength') else (rr - ll)
         
-        hh = bb - tt
-        self.font_height = hh 
-        if 'getmetrics' in dir(font):
+        # getlength is highly optimized in modern Pillow for fixed-width/monospace validation
+        self.font_width = int(round(font.getlength('A')))
+        
+        # Use textbbox to get exact pixel heights
+        left, top, right, bottom = font.getbbox('A')
+        
+        if hasattr(font, 'getmetrics'): # TrueType
             metrics_ascent, metrics_descent = font.getmetrics()
             self.spacing = int(self.spacing) if self.spacing != 'auto' else (metrics_descent - 2)
             print('Setting spacing to {}.'.format(self.spacing))
-            # despite what the PIL docs say, ascent appears to be the
-            # height of the font, while descent is not, in fact, negative.
-            # Couuld use testing with more fonts.
             self.font_height = metrics_ascent + metrics_descent + self.spacing
-        else:
-            # No autospacing for pil fonts, but they usually don't need it.
+        else: # PIL bitmap font
             self.spacing = int(self.spacing) if self.spacing != 'auto' else 0
-            # pil fonts don't seem to have metrics, but all
-            # characters seem to have the same height
-            ll, tt, rr, bb = font.getbbox('A')
-            #ww = (((rr * 1000) - (ll * 1000)) // 1000)
-            self.font_width = int(round(font.getlength('A'))) if hasattr(font, 'getlength') else (rr - ll)
-            
-            hh = bb - tt
-            self.font_height = hh + self.spacing
-
+            self.font_height = (bottom - top) + self.spacing
     def init_display(self):
         """Initialize the display - call the driver's init method"""
         self.driver.init(partial=self.partial, vcom=self.vcom, enable_a2=self.enable_a2, enable_1bpp=self.enable_1bpp, mhz=self.mhz)
@@ -288,124 +292,11 @@ class PaperTTY:
         draw.rectangle([upper_left, lower_right], fill=self.white)
         return ImageChops.logical_xor(image, mask)
 
-    def showfb(self, fb_num, rotate=None, invert=False, sleep=1, full_interval=100):
-        """Render the framebuffer - basically a copy-paste of showvnc at this point"""
-        def _get_fb_info(fb_num):
-            config_dir = "/sys/class/graphics/fb%d/" % fb_num
-            size = None
-            bpp = None
-            with open(config_dir + "/virtual_size", "r") as f:
-                size = tuple([int(t) for t in f.read().strip().split(",")])
-            with open(config_dir + "/bits_per_pixel", "r") as f:
-                bpp = int(f.read().strip())
-            return (size,bpp)
-
-        def _get_fb_img(fb_num):
-            size, bpp = _get_fb_info(fb_num)
-            with open("/dev/fb%d" % fb_num, "rb") as f:
-                mode = "BGRX" if bpp == 32 else "BGR;16"
-                return Image.frombytes("RGB", size, f.read(), "raw", mode).convert("L")
-
-        previous_fb_img = None
-        diff_bbox = None
-        # number of updates; when it's 0, do a full refresh
-        updates = 0
-        while True:
-            new_fb_img = _get_fb_img(fb_num)
-            # apply rotation if any
-            if rotate:
-                new_fb_img = new_fb_img.rotate(rotate, expand=True)
-            # apply invert
-            if invert:
-                new_fb_img = ImageOps.invert(new_fb_img)
-            # rescale image if needed
-            if new_fb_img.size != (self.driver.width, self.driver.height):
-                new_fb_img = new_fb_img.resize((self.driver.width, self.driver.height))
-            # if at least two frames have been processed, get a bounding box of their difference region
-            if new_fb_img and previous_fb_img:
-                diff_bbox = self.band(self.img_diff(new_fb_img, previous_fb_img))
-            # frames differ, so we should update the display
-            if diff_bbox:
-                # increment update counter
-                updates = (updates + 1) % full_interval
-                # if partial update is supported and it's not time for a full refresh,
-                # draw just the different region
-                if updates > 0 and (self.driver.supports_partial and self.partial):
-                    print("partial ({}): {}".format(updates, diff_bbox))
-                    self.driver.draw(diff_bbox[0], diff_bbox[1], new_fb_img.crop(diff_bbox))
-                # if partial update is not possible or desired, do a full refresh
-                else:
-                    print("full ({}): {}".format(updates, new_fb_img.size))
-                    old_partial = self.partial
-                    self.partial = False
-                    self.driver.draw(0, 0, new_fb_img)
-                    self.partial = old_partial
-            # otherwise this is the first frame, so run a full refresh to get things going
-            else:
-                if updates == 0:
-                    updates = (updates + 1) % full_interval
-                    print("initial ({}): {}".format(updates, new_fb_img.size))
-                    self.driver.draw(0, 0, new_fb_img)
-            previous_fb_img = new_fb_img.copy()
-            time.sleep(float(sleep))
-
-
-
-    def showvnc(self, host, display, password=None, rotate=None, invert=False, sleep=1, full_interval=100):
-        with api.connect(':'.join([host, display]), password=password) as client:
-            previous_vnc_image = None
-            diff_bbox = None
-            # number of updates; when it's 0, do a full refresh
-            updates = 0
-            client.timeout = 30
-            while True:
-                try:
-                    client.refreshScreen()
-                except TimeoutError:
-                    print("Timeout to server {}:{}".format(host, display))
-                    client.disconnect()
-                    sys.exit(1)
-                new_vnc_image = client.screen
-                # apply rotation if any
-                if rotate:
-                    new_vnc_image = new_vnc_image.rotate(rotate, expand=True)
-                # apply invert
-                if invert:
-                    new_vnc_image = ImageOps.invert(new_vnc_image)
-                # rescale image if needed
-                if new_vnc_image.size != (self.driver.width, self.driver.height):
-                    new_vnc_image = new_vnc_image.resize((self.driver.width, self.driver.height))
-                # if at least two frames have been processed, get a bounding box of their difference region
-                if new_vnc_image and previous_vnc_image:
-                    diff_bbox = self.band(self.img_diff(new_vnc_image, previous_vnc_image))
-                # frames differ, so we should update the display
-                if diff_bbox:
-                    # increment update counter
-                    updates = (updates + 1) % full_interval
-                    # if partial update is supported and it's not time for a full refresh,
-                    # draw just the different region
-                    if updates > 0 and (self.driver.supports_partial and self.partial):
-                        print("partial ({}): {}".format(updates, diff_bbox))
-                        self.driver.draw(diff_bbox[0], diff_bbox[1], new_vnc_image.crop(diff_bbox))
-                    # if partial update is not possible or desired, do a full refresh
-                    else:
-                        print("full ({}): {}".format(updates, new_vnc_image.size))
-                        self.driver.draw(0, 0, new_vnc_image)
-                # otherwise this is the first frame, so run a full refresh to get things going
-                else:
-                    if updates == 0:
-                        updates = (updates + 1) % full_interval
-                        print("initial ({}): {}".format(updates, new_vnc_image.size))
-                        self.driver.draw(0, 0, new_vnc_image)
-                previous_vnc_image = new_vnc_image.copy()
-                time.sleep(float(sleep))
-
     def showtext(self, text, fill, cursor=None, portrait=False, flipx=False, flipy=False, oldimage=None, oldtext=None, oldcursor=None):
         """Draw a string on the screen"""
         if self.ready():
             
-            #If partial updates are supported, run partialdraw_showtext() instead
-            #as it should be more efficient.
+            #If partial updates are supported, run partialdraw_showtext() instead as it should be more efficient.
             if self.driver.supports_partial and self.partial:
                 if oldtext is None:
                     oldtext = ""
@@ -415,7 +306,7 @@ class PaperTTY:
             # set order of h, w according to orientation
             image = Image.new('1', (self.driver.width, self.driver.height) if portrait else (
                 self.driver.height, self.driver.width),
-                              self.white)
+                            self.white)
             # create the Draw object and draw the text
             draw = ImageDraw.Draw(image)
 
@@ -425,24 +316,7 @@ class PaperTTY:
             
             # Slice our attributes to match the text lines
             inv_lines = self.split(self.inverts, self.cols) if hasattr(self, 'inverts') and self.cols else []
-            und_lines = self.split(self.underlines, self.cols) if hasattr(self, 'underlines') and self.cols else []
-            
-            # OPTIMIZATION: Helper to find contiguous blocks of '1's
-            def get_blocks(attr_str):
-                blocks = []
-                in_block = False
-                start = 0
-                for idx, char in enumerate(attr_str):
-                    if char == '1' and not in_block:
-                        start = idx
-                        in_block = True
-                    elif char == '0' and in_block:
-                        blocks.append((start, idx))
-                        in_block = False
-                if in_block:
-                    blocks.append((start, len(attr_str)))
-                return blocks
-
+            und_lines = self.split(self.underlines, self.cols) if hasattr(self, 'underlines') and self.cols else []   
             for i, line in enumerate(lines):
                 if line:
                     y = i * self.font_height
@@ -450,7 +324,7 @@ class PaperTTY:
                     
                     # Apply Underlines for hotkeys using fast block math
                     if i < len(und_lines) and '1' in und_lines[i]:
-                        for start, end in get_blocks(und_lines[i]):
+                        for start, end in PaperTTY.get_blocks(und_lines[i]):
                             start_px = int(round(self.font.getlength(line[:start]))) if hasattr(self.font, 'getlength') else start * self.font_width
                             end_px = int(round(self.font.getlength(line[:end]))) if hasattr(self.font, 'getlength') else end * self.font_width
                             draw.line((start_px, y + self.font_height - 2, end_px - 1, y + self.font_height - 2), fill=self.black, width=2)
@@ -459,7 +333,7 @@ class PaperTTY:
                     if i < len(inv_lines) and '1' in inv_lines[i]:
                         mask = Image.new('1', image.size, self.black)
                         mask_draw = ImageDraw.Draw(mask)
-                        for start, end in get_blocks(inv_lines[i]):
+                        for start, end in PaperTTY.get_blocks(inv_lines[i]):
                             start_px = int(round(self.font.getlength(line[:start]))) if hasattr(self.font, 'getlength') else start * self.font_width
                             end_px = int(round(self.font.getlength(line[:end]))) if hasattr(self.font, 'getlength') else end * self.font_width
                             mask_draw.rectangle([start_px, y, end_px - 1, y + self.font_height - 1], fill=self.white)
@@ -473,13 +347,23 @@ class PaperTTY:
                 cursor_y = cursor[1]
                 line_text = lines[cursor_y] if cursor_y < len(lines) else ""
                 
-                cursor_px = int(round(self.font.getlength(line_text[:cursor_col]))) if hasattr(self.font, 'getlength') else cursor_col * self.font_width
-                
+                # Use the draw object's layout engine to perfectly match the rendered text
+                if hasattr(draw, 'textlength'):
+                    cursor_px = int(round(draw.textlength(line_text[:cursor_col], font=self.font)))
+                else:
+                    cursor_px = int(round(self.font.getlength(line_text[:cursor_col]))) if hasattr(self.font, 'getlength') else cursor_col * self.font_width
+                    
                 if self.cursor == 'block':
-                    image = self.draw_block_cursor(cursor_px, cursor_y, image)
+                    # Grab the exact rendering width of the character under the cursor
+                    char = line_text[cursor_col:cursor_col+1] if cursor_col < len(line_text) else ' '
+                    if hasattr(draw, 'textlength'):
+                        char_width = int(round(draw.textlength(char, font=self.font)))
+                    else:
+                        char_width = int(round(self.font.getlength(char))) if hasattr(self.font, 'getlength') else self.font_width
+                    
+                    image = self.draw_block_cursor(cursor_px, cursor_y, image, char_width)
                 else:
                     self.draw_line_cursor(cursor_px, cursor_y, draw)
-                    
             # rotate image if using landscape
             if not portrait:
                 image = image.rotate(90, expand=True)
@@ -508,8 +392,6 @@ class PaperTTY:
             return image
         else:
             self.error("Display not ready")
-
-
 
     def partialdraw_showtext(self, text, fill, cursor, portrait, flipx, flipy, oldimage, oldtext, oldcursor):
 
@@ -655,10 +537,10 @@ class PaperTTY:
             newval = newlines[i] if i < len(newlines) else ''
             oldval = oldlines[i] if i < len(oldlines) else ''
             
-            new_inv = inv_lines[i] if i < len(inv_lines) else ''
-            old_inv = old_inv_lines[i] if i < len(old_inv_lines) else ''
-            new_und = und_lines[i] if i < len(und_lines) else ''
-            old_und = old_und_lines[i] if i < len(old_und_lines) else ''
+            new_inv = inv_lines[i] if i < len(inv_lines) else ()
+            old_inv = old_inv_lines[i] if i < len(old_inv_lines) else ()
+            new_und = und_lines[i] if i < len(und_lines) else ()
+            old_und = old_und_lines[i] if i < len(old_und_lines) else ()
 
             cursorIsOnThisLine = False
             cursorWasOnThisLine = False
@@ -1011,45 +893,27 @@ class PaperTTY:
         image = Image.new('1', (rowWidth, rowHeight), self.white)
         draw = ImageDraw.Draw(image)
 
-        # OPTIMIZATION: Helper to find contiguous blocks of '1's
-        def get_blocks(attr_str):
-            blocks = []
-            in_block = False
-            start = 0
-            for idx, char in enumerate(attr_str):
-                if char == '1' and not in_block:
-                    start = idx
-                    in_block = True
-                elif char == '0' and in_block:
-                    blocks.append((start, idx))
-                    in_block = False
-            if in_block:
-                blocks.append((start, len(attr_str)))
-            return blocks
-
         for j, chunk in enumerate(chunks):
             x = 0
             y = j * height
             newval = chunk["newval"]
-            new_inv = chunk.get("new_inv", "")
-            new_und = chunk.get("new_und", "")
-            cursorIsOnThisLine = chunk["cursorIsOnThisLine"]
-
+            new_inv = chunk.get("new_inv", ())
+            new_und = chunk.get("new_und", ())
             # FAST Native rendering
             draw.text((x,y), newval, font=self.font, fill=fill, spacing=self.spacing)
             
             # Draw Underlines for colored/bold shortcut keys
-            if '1' in new_und:
-                for start, end in get_blocks(new_und):
+            if True in new_und:
+                for start, end in PaperTTY.get_blocks(new_und):
                     start_px = int(round(self.font.getlength(newval[:start]))) if hasattr(self.font, 'getlength') else start * self.font_width
                     end_px = int(round(self.font.getlength(newval[:end]))) if hasattr(self.font, 'getlength') else end * self.font_width
                     draw.line((start_px, y + height - 2, end_px - 1, y + height - 2), fill=self.black, width=2)
 
             # Invert cells with background colors (menus and tabs)
-            if '1' in new_inv:
+            if True in new_inv:
                 mask = Image.new('1', image.size, self.black)
                 mask_draw = ImageDraw.Draw(mask)
-                for start, end in get_blocks(new_inv):
+                for start, end in PaperTTY.get_blocks(new_inv):
                     start_px = int(round(self.font.getlength(newval[:start]))) if hasattr(self.font, 'getlength') else start * self.font_width
                     end_px = int(round(self.font.getlength(newval[:end]))) if hasattr(self.font, 'getlength') else end * self.font_width
                     mask_draw.rectangle([start_px, y, end_px - 1, y + height - 1], fill=self.white)
@@ -1201,7 +1065,6 @@ def list_drivers():
     """List available display drivers"""
     PaperTTY.error(get_driver_list(), code=0)
 
-
 @click.command()
 @click.option('--size', default=16, help='Stripe size to fill with (8-32)')
 @click.pass_obj
@@ -1211,108 +1074,6 @@ def scrub(settings, size):
         PaperTTY.error("Invalid stripe size, must be 8-32")
     ptty = settings.get_init_tty()
     ptty.driver.scrub(fillsize=size)
-
-
-@click.command()
-@click.option('--font', default=PaperTTY.defaultfont, help='Path to a TrueType or PIL font',
-              show_default=True)
-@click.option('--size', 'fontsize', default=8, help='Font size', show_default=True)
-@click.option('--width', default=None, help='Fit to width [default: display width / font width]')
-@click.option('--portrait', default=False, is_flag=True, help='Use portrait orientation', show_default=True)
-@click.option('--nofold', default=False, is_flag=True, help="Don't fold the input", show_default=True)
-@click.option('--spacing', default='0', help='Line spacing for the text, "auto" to automatically determine a good value', show_default=True)
-@click.option('--rows', 'ttyrows', default=None, help='Set TTY rows (--cols required too)')
-@click.option('--cols', 'ttycols', default=None, help='Set TTY columns (--rows required too)')
-@click.option('--flipx', default=False, is_flag=True, help='Flip X axis (EXPERIMENTAL/BROKEN)', show_default=False)
-@click.option('--flipy', default=False, is_flag=True, help='Flip Y axis (EXPERIMENTAL/BROKEN)', show_default=False)
-@click.pass_obj
-def stdin(settings, font, fontsize, width, portrait, nofold, spacing, ttyrows, ttycols, flipx, flipy):
-    """Display standard input and leave it on screen"""
-    settings.args['font'] = font
-    settings.args['fontsize'] = fontsize
-    settings.args['spacing'] = spacing
-    ptty = settings.get_init_tty()
-    text = sys.stdin.read()
-    if not nofold:
-        if width:
-            text = ptty.fold(text, width)
-        else:
-            ll, tt, rr, bb = ptty.font.getbbox('M')
-            ww = (((rr * 1000) - (ll * 1000)) // 1000)
-            hh = bb - tt
-            font_height = hh
-            font_width = ww
-            max_width = int((ptty.driver.width - 8) / font_width) if portrait else int(ptty.driver.height / font_width)
-            text = ptty.fold(text, width=max_width)
-    if ttyrows:
-        ptty.rows = int(ttyrows)
-    if ttycols:
-        ptty.cols = int(ttycols)
-    textargs = {'portrait': portrait, 'flipx': flipx, 'flipy': flipy}
-    ptty.showtext(text, fill=ptty.driver.black, **textargs)
-
-
-@click.command()
-@click.option('--image', 'image_location', help='Location of image to display (omit for stdin)', show_default=True)
-@click.option('--stretch', default=False, is_flag=True, show_default=True,
-              help='Stretch image so that it fills the entire screen (may distort your image!)')
-@click.option('--no-resize', default=False, is_flag=True, show_default=True,
-              help='Do not resize image to fit the screen (an error will occur if the image is too large!)')
-@click.option('--fill-color', default='white', help='Colour to pad image with', show_default=True)
-@click.option('--mirror', default=False, is_flag=True, help='Mirror horizontally', show_default=True)
-@click.option('--flip', default=False, is_flag=True, help='Mirror vertically', show_default=True)
-@click.option('--rotate', default=0, help='Rotate the image by N degrees', show_default=True, type=float)
-@click.pass_obj
-def image(settings, image_location, stretch, no_resize, fill_color, mirror, flip, rotate):
-    """ Display an image """
-    if image_location is None or image_location == '-':
-        # XXX: logging to stdout, in line with the rest of this project
-        print('Reading image data from stdin... (set "--image" to load an image from a given file path)')
-        image_data = BytesIO(sys.stdin.buffer.read())
-        image = Image.open(image_data)
-    else:
-        image = Image.open(image_location)
-    
-    #Disable 1bpp and a2 by default if not using terminal mode
-    settings.args['enable_a2'] = False
-    settings.args['enable_1bpp'] = False
-
-    ptty = settings.get_init_tty()
-    display_image(ptty.driver, image, stretch=stretch, no_resize=no_resize, fill_color=fill_color, rotate=rotate, mirror=mirror, flip=flip)
-
-
-@click.command()
-@click.option('--host', default="localhost", help="VNC host to connect to", show_default=True)
-@click.option('--display', default="0", help="VNC display to use (0 = port 5900)", show_default=True)
-@click.option('--password', default=None, help="VNC password")
-@click.option('--rotate', default=None, help="Rotate screen (90 / 180 / 270)")
-@click.option('--invert', default=False, is_flag=True, help="Invert colors")
-@click.option('--sleep', default=1, show_default=True, help="Refresh interval (s)", type=float)
-@click.option('--fullevery', default=50, show_default=True, help="# of partial updates between full updates")
-@click.pass_obj
-def vnc(settings, host, display, password, rotate, invert, sleep, fullevery):
-    """Display a VNC desktop"""
-    
-    #Disable 1bpp and a2 by default if not using terminal mode
-    settings.args['enable_a2'] = False
-    settings.args['enable_1bpp'] = False
-
-    ptty = settings.get_init_tty()
-    ptty.showvnc(host, display, password, int(rotate) if rotate else None, invert, sleep, fullevery)
-
-
-@click.command()
-@click.option('--fb-num', default="0", help="Framebuffer to display (/dev/fbX)", show_default=True)
-@click.option('--rotate', default=None, help="Rotate screen (90 / 180 / 270)")
-@click.option('--invert', default=False, is_flag=True, help="Invert colors")
-@click.option('--sleep', default=1, show_default=True, help="Refresh interval (s)", type=float)
-@click.option('--fullevery', default=50, show_default=True, help="# of partial updates between full updates")
-@click.pass_obj
-def fb(settings, fb_num, rotate, invert, sleep, fullevery):
-    """Display the framebuffer"""
-    ptty = settings.get_init_tty()
-    ptty.showfb(int(fb_num), int(rotate) if rotate else None, invert, sleep, fullevery)
-
 
 @click.command()
 @click.option('--vcsa', default='/dev/vcsa1', help='Virtual console device (/dev/vcsa[1-63])', show_default=True)
@@ -1527,9 +1288,9 @@ def terminal(settings, vcsa, font, fontsize, noclear, nocursor, cursor, sleep, t
                     attr_bytes = f.read(rows * cols * 2)[1::2]
                     
                     # If background color > 0, flag for inversion
-                    ptty.inverts = ''.join(['1' if (a >> 4) & 0x0F != 0 else '0' for a in attr_bytes])
+                    ptty.inverts = tuple((a >> 4) & 0x0F != 0 for a in attr_bytes)
                     # If foreground is not default gray (0x07) or black (0x00), flag for underline
-                    ptty.underlines = ''.join(['1' if (a & 0x0F) not in (0x00, 0x07) else '0' for a in attr_bytes])
+                    ptty.underlines = tuple((a & 0x0F) not in (0x00, 0x07) for a in attr_bytes)
                     
                     if not hasattr(ptty, 'old_inverts'): ptty.old_inverts = ptty.inverts
                     if not hasattr(ptty, 'old_underlines'): ptty.old_underlines = ptty.underlines
@@ -1564,10 +1325,6 @@ def terminal(settings, vcsa, font, fontsize, noclear, nocursor, cursor, sleep, t
 # add all the CLI commands
 cli.add_command(scrub)
 cli.add_command(terminal)
-cli.add_command(stdin)
-cli.add_command(image)
-cli.add_command(vnc)
-cli.add_command(fb)
 cli.add_command(list_drivers)
 
 
