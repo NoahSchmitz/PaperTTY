@@ -540,17 +540,19 @@ class PaperTTY:
         return oldimage
     
     def partialdraw_get_changed_lines(self, cursor, oldcursor, oldlines, newlines):
-
-        """This function compares two strings arrays, oldlines and newlines, and
-            figures out which lines of text in those arrays are different.
-            It also takes cursor position into consideration when figuring out if
-            the text has "changed" or not."""
-
-        #List of lines of text which have changed
         changedLines = []
-        # Split attribute strings by columns
+        
         inv_lines = self.split(self.inverts, self.cols) if hasattr(self, 'inverts') else []
         old_inv_lines = self.split(self.old_inverts, self.cols) if hasattr(self, 'old_inverts') else []
+        
+        blue_lines = self.split(self.blues, self.cols) if hasattr(self, 'blues') else []
+        green_lines = self.split(self.greens, self.cols) if hasattr(self, 'greens') else []
+        red_lines = self.split(self.reds, self.cols) if hasattr(self, 'reds') else []
+
+        # ADD THESE: Track the previous states
+        old_blue_lines = self.split(self.old_blues, self.cols) if hasattr(self, 'old_blues') else []
+        old_green_lines = self.split(self.old_greens, self.cols) if hasattr(self, 'old_greens') else []
+        old_red_lines = self.split(self.old_reds, self.cols) if hasattr(self, 'old_reds') else []
 
         for i in range(self.rows):
             newval = newlines[i] if i < len(newlines) else ''
@@ -558,6 +560,15 @@ class PaperTTY:
             
             new_inv = inv_lines[i] if i < len(inv_lines) else ()
             old_inv = old_inv_lines[i] if i < len(old_inv_lines) else ()
+            
+            new_blue = blue_lines[i] if i < len(blue_lines) else ()
+            new_green = green_lines[i] if i < len(green_lines) else ()
+            new_red = red_lines[i] if i < len(red_lines) else ()
+
+            # ADD THESE:
+            old_blue = old_blue_lines[i] if i < len(old_blue_lines) else ()
+            old_green = old_green_lines[i] if i < len(old_green_lines) else ()
+            old_red = old_red_lines[i] if i < len(old_red_lines) else ()
 
             cursorIsOnThisLine = False
             cursorWasOnThisLine = False
@@ -571,18 +582,24 @@ class PaperTTY:
             if cursorIsOnThisLine and cursorWasOnThisLine:
                 if oldcursor[0] != cursor[0]:
                     cursorMovedHorizontally = True
-                elif oldval == newval and old_inv == new_inv:
+                elif oldval == newval and old_inv == new_inv and new_blue == old_blue and new_green == old_green and new_red == old_red:
                     cursorIsOnThisLine = False
                     cursorWasOnThisLine = False
 
             # Draw if text OR colors change
-            drawThisLine = cursorMovedHorizontally or cursorIsOnThisLine != cursorWasOnThisLine or oldval != newval or old_inv != new_inv
+            drawThisLine = cursorMovedHorizontally or cursorIsOnThisLine != cursorWasOnThisLine or oldval != newval or old_inv != new_inv or new_blue != old_blue or new_green != old_green or new_red != old_red
 
             lineToDraw = {
                 "drawThisLine": drawThisLine,
                 "newval": newval,
                 "new_inv": new_inv,
                 "old_inv": old_inv,
+                "new_blue": new_blue,
+                "new_green": new_green,
+                "new_red": new_red,
+                "old_blue": old_blue,     # Pass these down
+                "old_green": old_green,   # Pass these down
+                "old_red": old_red,       # Pass these down
                 "cursorIsOnThisLine": cursorIsOnThisLine,
                 "oldval": oldval,
                 "cursorWasOnThisLine": cursorWasOnThisLine
@@ -748,7 +765,9 @@ class PaperTTY:
                     for j in range(smallerLen):
                         if (oldval[j] != newval[j] or 
                             (j < len(arr["old_inv"]) and arr["old_inv"][j] != arr["new_inv"][j]) or 
-                            (j < len(arr["old_und"]) and arr["old_und"][j] != arr["new_und"][j])):
+                            (j < len(arr["old_blue"]) and arr["old_blue"][j] != arr["new_blue"][j]) or 
+                            (j < len(arr["old_green"]) and arr["old_green"][j] != arr["new_green"][j]) or 
+                            (j < len(arr["old_red"]) and arr["old_red"][j] != arr["new_red"][j])):
                             firstChanged = j
                             break
 
@@ -769,7 +788,9 @@ class PaperTTY:
                     for j in range(newlen):
                         if (oldval[j] != newval[j] or 
                             (j < len(arr["old_inv"]) and arr["old_inv"][j] != arr["new_inv"][j]) or 
-                            (j < len(arr["old_und"]) and arr["old_und"][j] != arr["new_und"][j])):
+                            (j < len(arr["old_blue"]) and arr["old_blue"][j] != arr["new_blue"][j]) or 
+                            (j < len(arr["old_green"]) and arr["old_green"][j] != arr["new_green"][j]) or 
+                            (j < len(arr["old_red"]) and arr["old_red"][j] != arr["new_red"][j])):
                             lastChanged = j
 
                 #Set the x coordinate to start at `firstChanged` since we won't draw
@@ -787,7 +808,9 @@ class PaperTTY:
                     "y":y,
                     "newval":newval,
                     "new_inv":arr["new_inv"],
-                    "new_und":arr["new_und"],
+                    "new_blue":arr["new_blue"],   # Replaced new_und
+                    "new_green":arr["new_green"], # Added
+                    "new_red":arr["new_red"],     # Added
                     "cursorIsOnThisLine":cursorIsOnThisLine,
                     "subsequentLines":subsequentLines,
                     "firstChanged":firstChanged,
