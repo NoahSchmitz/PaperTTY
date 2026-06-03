@@ -320,18 +320,35 @@ class PaperTTY:
             
             # Slice our attributes to match the text lines
             inv_lines = self.split(self.inverts, self.cols) if hasattr(self, 'inverts') and self.cols else []
-            und_lines = self.split(self.underlines, self.cols) if hasattr(self, 'underlines') and self.cols else []   
+            blue_lines = self.split(self.blues, self.cols) if hasattr(self, 'blues') and self.cols else []
+            green_lines = self.split(self.greens, self.cols) if hasattr(self, 'greens') and self.cols else []
+            red_lines = self.split(self.reds, self.cols) if hasattr(self, 'reds') and self.cols else []
+            
             for i, line in enumerate(lines):
                 if line:
                     y = i * self.font_height
                     draw.text((0,y), line, font=self.font, fill=fill, spacing=self.spacing)
-                    
-                    # Apply Underlines for hotkeys using fast block math
-                    if i < len(und_lines) and '1' in und_lines[i]:
-                        for start, end in PaperTTY.get_blocks(und_lines[i], line):
-                            start_px = int(round(self.font.getlength(line[:start]))) if hasattr(self.font, 'getlength') else start * self.font_width
-                            end_px = int(round(self.font.getlength(line[:end]))) if hasattr(self.font, 'getlength') else end * self.font_width
+
+                    # BLUE: Underlines
+                    if i < len(blue_lines) and True in blue_lines[i]:
+                        for start, end in PaperTTY.get_blocks(blue_lines[i], line):
+                            start_px = int(round(self.font.getlength(line[:start])))
+                            end_px = int(round(self.font.getlength(line[:end])))
                             draw.line((start_px, y + self.font_height - 2, end_px - 1, y + self.font_height - 2), fill=self.black, width=2)
+
+                    # GREEN: Strikethrough
+                    if i < len(green_lines) and True in green_lines[i]:
+                        for start, end in PaperTTY.get_blocks(green_lines[i], line):
+                            start_px = int(round(self.font.getlength(line[:start])))
+                            end_px = int(round(self.font.getlength(line[:end])))
+                            draw.line((start_px, y + (self.font_height // 2), end_px - 1, y + (self.font_height // 2)), fill=self.black, width=1)
+
+                    # RED: "Fake Bold" 
+                    if i < len(red_lines) and True in red_lines[i]:
+                        for start, end in PaperTTY.get_blocks(red_lines[i], line):
+                            bold_text = line[start:end]
+                            start_px = int(round(self.font.getlength(line[:start])))
+                            draw.text((start_px + 1, y), bold_text, font=self.font, fill=fill, spacing=self.spacing)
                                 
                     # Apply Reverse-Video for menus using fast block math
                     if i < len(inv_lines) and '1' in inv_lines[i]:
@@ -534,8 +551,6 @@ class PaperTTY:
         # Split attribute strings by columns
         inv_lines = self.split(self.inverts, self.cols) if hasattr(self, 'inverts') else []
         old_inv_lines = self.split(self.old_inverts, self.cols) if hasattr(self, 'old_inverts') else []
-        und_lines = self.split(self.underlines, self.cols) if hasattr(self, 'underlines') else []
-        old_und_lines = self.split(self.old_underlines, self.cols) if hasattr(self, 'old_underlines') else []
 
         for i in range(self.rows):
             newval = newlines[i] if i < len(newlines) else ''
@@ -543,8 +558,6 @@ class PaperTTY:
             
             new_inv = inv_lines[i] if i < len(inv_lines) else ()
             old_inv = old_inv_lines[i] if i < len(old_inv_lines) else ()
-            new_und = und_lines[i] if i < len(und_lines) else ()
-            old_und = old_und_lines[i] if i < len(old_und_lines) else ()
 
             cursorIsOnThisLine = False
             cursorWasOnThisLine = False
@@ -558,20 +571,18 @@ class PaperTTY:
             if cursorIsOnThisLine and cursorWasOnThisLine:
                 if oldcursor[0] != cursor[0]:
                     cursorMovedHorizontally = True
-                elif oldval == newval and old_inv == new_inv and old_und == new_und:
+                elif oldval == newval and old_inv == new_inv:
                     cursorIsOnThisLine = False
                     cursorWasOnThisLine = False
 
             # Draw if text OR colors change
-            drawThisLine = cursorMovedHorizontally or cursorIsOnThisLine != cursorWasOnThisLine or oldval != newval or old_inv != new_inv or old_und != new_und
+            drawThisLine = cursorMovedHorizontally or cursorIsOnThisLine != cursorWasOnThisLine or oldval != newval or old_inv != new_inv
 
             lineToDraw = {
                 "drawThisLine": drawThisLine,
                 "newval": newval,
                 "new_inv": new_inv,
-                "new_und": new_und,
                 "old_inv": old_inv,
-                "old_und": old_und,
                 "cursorIsOnThisLine": cursorIsOnThisLine,
                 "oldval": oldval,
                 "cursorWasOnThisLine": cursorWasOnThisLine
@@ -902,16 +913,31 @@ class PaperTTY:
             y = j * height
             newval = chunk["newval"]
             new_inv = chunk.get("new_inv", ())
-            new_und = chunk.get("new_und", ())
             # FAST Native rendering
             draw.text((x,y), newval, font=self.font, fill=fill, spacing=self.spacing)
-            
-            # Draw Underlines for colored/bold shortcut keys
-            if True in new_und:
-                for start, end in PaperTTY.get_blocks(new_und, newval):
-                    start_px = int(round(self.font.getlength(newval[:start]))) if hasattr(self.font, 'getlength') else start * self.font_width
-                    end_px = int(round(self.font.getlength(newval[:end]))) if hasattr(self.font, 'getlength') else end * self.font_width
+                        
+            # BLUE: Underlines
+            if True in chunk.get("new_blue", ()):
+                for start, end in PaperTTY.get_blocks(chunk["new_blue"], newval):
+                    start_px = int(round(self.font.getlength(newval[:start])))
+                    end_px = int(round(self.font.getlength(newval[:end])))
                     draw.line((start_px, y + height - 2, end_px - 1, y + height - 2), fill=self.black, width=2)
+
+            # GREEN: Strikethrough (or double underline)
+            if True in chunk.get("new_green", ()):
+                for start, end in PaperTTY.get_blocks(chunk["new_green"], newval):
+                    start_px = int(round(self.font.getlength(newval[:start])))
+                    end_px = int(round(self.font.getlength(newval[:end])))
+                    # Draw line through the middle of the text
+                    draw.line((start_px, y + (height // 2), end_px - 1, y + (height // 2)), fill=self.black, width=1)
+
+            # RED: "Fake Bold" (Overdraw shifted by 1px)
+            if True in chunk.get("new_red", ()):
+                for start, end in PaperTTY.get_blocks(chunk["new_red"], newval):
+                    bold_text = newval[start:end]
+                    start_px = int(round(self.font.getlength(newval[:start])))
+                    # Draw the exact same text, but shifted X by +1
+                    draw.text((start_px + 1, y), bold_text, font=self.font, fill=fill, spacing=self.spacing)
 
             # Invert cells with background colors (menus and tabs)
             if True in new_inv:
@@ -1293,12 +1319,20 @@ def terminal(settings, vcsa, font, fontsize, noclear, nocursor, cursor, sleep, t
                     
                     # If background color > 0, flag for inversion
                     ptty.inverts = tuple((a >> 4) & 0x0F != 0 for a in attr_bytes)
-                    # If foreground is not default gray (0x07) or black (0x00), flag for underline
-                    ptty.underlines = tuple((a & 0x0F) not in (0x00, 0x07) for a in attr_bytes)
+                    
+                    # Isolate foreground color (0-15)
+                    fg = tuple(a & 0x0F for a in attr_bytes)
+
+                    # Map colors to styles
+                    ptty.blues = tuple(c in (4, 6, 12, 14) for c in fg)
+                    ptty.reds = tuple(c in (1, 5, 9, 13) for c in fg)
+                    ptty.greens = tuple(c in (2, 3, 10, 11) for c in fg)
                     
                     if not hasattr(ptty, 'old_inverts'): ptty.old_inverts = ptty.inverts
-                    if not hasattr(ptty, 'old_underlines'): ptty.old_underlines = ptty.underlines
-        
+                    if not hasattr(ptty, 'old_blues'): ptty.old_blues = ptty.blues
+                    if not hasattr(ptty, 'old_greens'): ptty.old_greens = ptty.greens
+                    if not hasattr(ptty, 'old_reds'): ptty.old_reds = ptty.reds
+                    
                     # read from the text buffer 
                     buff = vcsu.read()
                     
@@ -1311,17 +1345,25 @@ def terminal(settings, vcsa, font, fontsize, noclear, nocursor, cursor, sleep, t
                     cursor = (x, y, char_under_cursor.decode(encoding, 'ignore'))
                     # add newlines per column count
                     buff = ''.join([r.decode(encoding, 'replace') + '\n' for r in ptty.split(buff, cols * character_width)])
+                    color_changed = (ptty.inverts != ptty.old_inverts or 
+                                     ptty.blues != ptty.old_blues or 
+                                     ptty.greens != ptty.old_greens or 
+                                     ptty.reds != ptty.old_reds)
+
                     # do something only if content has changed or cursor was moved
-                    if buff != oldbuff or cursor != oldcursor or ptty.inverts != ptty.old_inverts or ptty.underlines != ptty.old_underlines:
+                    if buff != oldbuff or cursor != oldcursor or color_changed:
                         oldimage = ptty.showtext(buff, fill=ptty.black, cursor=cursor if not nocursor else None,
                                                 oldimage=oldimage,
                                                 oldtext=oldbuff,
                                                 oldcursor=oldcursor,
                                                 **textargs)
+                        # Reassign all old variables so it doesn't trigger a continuous redraw loop
                         oldbuff = buff
                         oldcursor = cursor
                         ptty.old_inverts = ptty.inverts
-                        ptty.old_underlines = ptty.underlines
+                        ptty.old_blues = ptty.blues
+                        ptty.old_greens = ptty.greens
+                        ptty.old_reds = ptty.reds
                 # delay before next update check
                 time.sleep(float(sleep))
 
