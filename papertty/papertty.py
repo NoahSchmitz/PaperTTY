@@ -353,6 +353,7 @@ class PaperTTY:
                             bold_text = line[start:end]
                             start_px = int(round(self.font.getlength(line[:start])))
                             draw.text((start_px + 1, y), bold_text, font=self.font, fill=fill, spacing=self.spacing)
+                            draw.text((start_px + 1, y + 1), bold_text, font=self.font, fill=fill, spacing=self.spacing)
                                 
                     # Apply Reverse-Video for menus using fast block math
                     if i < len(inv_lines) and '1' in inv_lines[i]:
@@ -968,6 +969,7 @@ class PaperTTY:
                     start_px = int(round(self.font.getlength(newval[:start])))
                     # Draw the exact same text, but shifted X by +1
                     draw.text((start_px + 1, y), bold_text, font=self.font, fill=fill, spacing=self.spacing)
+                    draw.text((start_px + 1, y + 1), bold_text, font=self.font, fill=fill, spacing=self.spacing)
 
             # Invert cells with background colors (menus and tabs)
             if True in new_inv:
