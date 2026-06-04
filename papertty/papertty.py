@@ -48,10 +48,6 @@ from collections import OrderedDict
 # for reading stdin data for use with Pillow
 from io import BytesIO
 
-# Initialize the I2C bus and the MPU6050 sensor
-i2c = board.I2C()  # Automatically defaults to GPIO 2 (SDA) and GPIO 3 (SCL)
-mpu = adafruit_mpu6050.MPU6050(i2c)
-
 # resource path
 RESOURCE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "resources")
 
@@ -277,10 +273,15 @@ class PaperTTY:
         """Return the maximum columns and rows we can display with this font"""
         width = self.font_width
         height = self.font_height
+        
+        # Decouple logical resolution from hardware defaults
+        logical_width = min(self.driver.width, self.driver.height) if portrait else max(self.driver.width, self.driver.height)
+        logical_height = max(self.driver.width, self.driver.height) if portrait else min(self.driver.width, self.driver.height)
+        
         # hacky, subtract just a bit to avoid going over the border with small fonts
-        pw = self.driver.width - 3
-        ph = self.driver.height
-        return int((pw if portrait else ph) / width), int((ph if portrait else pw) / height)
+        pw = logical_width - 3
+        ph = logical_height
+        return int(pw / width), int(ph / height)
 
     def draw_line_cursor(self, pixel_x, cur_y, draw):
         width = self.font_width if isinstance(self.font_width, int) else 4
@@ -313,11 +314,15 @@ class PaperTTY:
 
                 return self.partialdraw_showtext(text=text, fill=fill, cursor=cursor, portrait=portrait, flipx=flipx, flipy=flipy, oldimage=oldimage, oldtext=oldtext, oldcursor=oldcursor)
 
-            # set order of h, w according to orientation
-            image = Image.new('1', (self.driver.width, self.driver.height) if portrait else (
-                self.driver.height, self.driver.width),
-                            self.white)
+            # Decouple logical resolution from hardware defaults
+            logical_width = min(self.driver.width, self.driver.height) if portrait else max(self.driver.width, self.driver.height)
+            logical_height = max(self.driver.width, self.driver.height) if portrait else min(self.driver.width, self.driver.height)
+            
+            native_is_portrait = self.driver.height > self.driver.width
+            needs_rotation = portrait != native_is_portrait
+
             # create the Draw object and draw the text
+            image = Image.new('1', (logical_width, logical_height), self.white)
             draw = ImageDraw.Draw(image)
 
             # This is a workaround for a font height bug in PIL
@@ -396,8 +401,8 @@ class PaperTTY:
                     image = self.draw_block_cursor(cursor_px, cursor_y, image, char_width)
                 else:
                     self.draw_line_cursor(cursor_px, cursor_y, draw)
-            # rotate image if using landscape
-            if not portrait:
+            # Rotate image to fit native hardware orientation
+            if needs_rotation:
                 image = image.rotate(90, expand=True)
             # apply flips if desired
             if flipx:
@@ -448,8 +453,11 @@ class PaperTTY:
         #Figure out the width and height of the panel after rotation.
         #These values are used when determining the maximum allowed size of a row of text,
         #when figuring out coordinates, and so on.
-        driverHeight = self.driver.height if portrait else self.driver.width
-        driverWidth = self.driver.width if portrait else self.driver.height
+        driverWidth = min(self.driver.width, self.driver.height) if portrait else max(self.driver.width, self.driver.height)
+        driverHeight = max(self.driver.width, self.driver.height) if portrait else min(self.driver.width, self.driver.height)
+        
+        native_is_portrait = self.driver.height > self.driver.width
+        needs_rotation = portrait != native_is_portrait
         
         #First, run through each row and build a list of strings to potentially draw
         changedLines = self.partialdraw_get_changed_lines(cursor, oldcursor, oldlines, newlines)
@@ -520,9 +528,8 @@ class PaperTTY:
 
             #If the screen is rotated, then switch the bounds around.
             #This is because we crop BEFORE rotating, so doing it here
-            #with switched values saves us from needing to crop a second
-            #time.
-            if not portrait:
+            # with switched values saves us from needing to crop a second time.
+            if needs_rotation:
                 xdiv, ydiv = ydiv, xdiv
 
             bbox = self.band(diff_bbox, xdiv=xdiv, ydiv=ydiv)
@@ -530,8 +537,8 @@ class PaperTTY:
             croppedImage = oldimage.crop(bbox)
             x, y = bbox[0], bbox[1]
 
-            #Rotate the image and coordinates
-            if not portrait:
+            # Rotate the image and coordinates to fit native hardware
+            if needs_rotation:
                 croppedImage = croppedImage.rotate(90, expand=True)
                 x, y = y, driverWidth - x - croppedImage.height
 
@@ -1286,7 +1293,19 @@ def terminal(settings, vcsa, font, fontsize, noclear, nocursor, cursor, sleep, t
         else:
             print("Started displaying {}, minimum update interval {} s, exit with Ctrl-C".format(vcsa, sleep))
         character_width, vcsudev = ptty.vcsudev(vcsa)
-
+        
+        autorotate_hardware_initialized = False
+        if autorotate:
+            try:
+                # Initialize the I2C bus and the MPU6050 sensor
+                i2c = board.I2C()  # Automatically defaults to GPIO 2 (SDA) and GPIO 3 (SCL)
+                mpu = adafruit_mpu6050.MPU6050(i2c)
+                autorotate_hardware_initialized = True
+            except ImportError:
+                PaperTTY.error("Autorotate requires 'adafruit-circuitpython-mpu6050' and 'board' modules.")
+            except ValueError:
+                PaperTTY.error("MPU-6050 not detected. Check I2C wiring.")
+            
         while True:
             if flags['show_menu']:
                 flags['show_menu'] = False
@@ -1373,7 +1392,7 @@ def terminal(settings, vcsa, font, fontsize, noclear, nocursor, cursor, sleep, t
                 oldbuff = ''
                 flags['scrub_requested'] = False
             
-            if autorotate:
+            if autorotate and autorotate_hardware_initialized:
                 accel_x, accel_y, accel_z = mpu.acceleration
                 abs_x = abs(accel_x)
                 abs_y = abs(accel_y)
