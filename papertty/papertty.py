@@ -303,7 +303,7 @@ class PaperTTY:
         draw.rectangle([upper_left, lower_right], fill=self.white)
         return ImageChops.logical_xor(image, mask)
 
-    def showtext(self, text, fill, cursor=None, portrait=False, flipx=False, flipy=False, oldimage=None, oldtext=None, oldcursor=None):
+    def showtext(self, text, fill, cursor=None, portrait=False, inverted=False, flipx=False, flipy=False, oldimage=None, oldtext=None, oldcursor=None):
         """Draw a string on the screen"""
         if self.ready():
             
@@ -312,7 +312,7 @@ class PaperTTY:
                 if oldtext is None:
                     oldtext = ""
 
-                return self.partialdraw_showtext(text=text, fill=fill, cursor=cursor, portrait=portrait, flipx=flipx, flipy=flipy, oldimage=oldimage, oldtext=oldtext, oldcursor=oldcursor)
+                return self.partialdraw_showtext(text=text, fill=fill, cursor=cursor, portrait=portrait, inverted=inverted, flipx=flipx, flipy=flipy, oldimage=oldimage, oldtext=oldtext, oldcursor=oldcursor)
 
             # Decouple logical resolution from hardware defaults
             logical_width = min(self.driver.width, self.driver.height) if portrait else max(self.driver.width, self.driver.height)
@@ -404,6 +404,9 @@ class PaperTTY:
             # Rotate image to fit native hardware orientation
             if needs_rotation:
                 image = image.rotate(90, expand=True)
+            # Apply 180-degree rotation for Upside-Down / Reverse-Landscape
+            if inverted:
+                image = image.rotate(180, expand=True)
             # apply flips if desired
             if flipx:
                 image = image.transpose(Image.FLIP_LEFT_RIGHT)
@@ -430,7 +433,7 @@ class PaperTTY:
         else:
             self.error("Display not ready")
 
-    def partialdraw_showtext(self, text, fill, cursor, portrait, flipx, flipy, oldimage, oldtext, oldcursor):
+    def partialdraw_showtext(self, text, fill, cursor, portrait, inverted, flipx, flipy, oldimage, oldtext, oldcursor):
 
         """Draw a string on the screen one line at a time.
            This function serves as an alternative to showtext() and aims to be more efficient
@@ -541,6 +544,12 @@ class PaperTTY:
             if needs_rotation:
                 croppedImage = croppedImage.rotate(90, expand=True)
                 x, y = y, driverWidth - x - croppedImage.height
+
+            # Invert image and mirror coordinates for upside-down orientations
+            if inverted:
+                croppedImage = croppedImage.rotate(180, expand=True)
+                x = self.driver.width - x - croppedImage.width
+                y = self.driver.height - y - croppedImage.height
 
             #If multi_draw is supported, add the image to an array so they can
             #all be sent through at once.
@@ -1245,35 +1254,36 @@ def terminal(settings, vcsa, font, fontsize, noclear, nocursor, cursor, sleep, t
     signal.signal(signal.SIGINT, sigint_handler)
     signal.signal(signal.SIGUSR1, sigusr1_handler)
 
-    def set_portrait(target_state=None):
+    inverted = False # Default state
+
+    def set_orientation(target_portrait, target_inverted):
         """
-        Sets the display orientation. 
-        If target_state is None, it acts as a toggle.
+        Sets the display orientation with 4-way support. 
         """
-        nonlocal portrait, oldbuff, oldimage
+        nonlocal portrait, inverted, oldbuff, oldimage
         
-        # If a specific state is passed, check if we are already in it
-        if target_state is not None:
-            if portrait == target_state:
-                return # We are already in this orientation, do nothing
-            portrait = target_state
-        else:
-            # If no state was passed, act as a simple toggle
-            portrait = not portrait
+        # If we are already in this exact orientation, do nothing
+        if portrait == target_portrait and inverted == target_inverted:
+            return 
+            
+        portrait = target_portrait
+        inverted = target_inverted
             
         textargs['portrait'] = portrait
-        print('Portrait mode is now {}.'.format('ON' if portrait else 'OFF'))
+        textargs['inverted'] = inverted # Pass this to the render loops
+        
+        state_str = "Portrait" if portrait else "Landscape"
+        inv_str = " (Inverted)" if inverted else ""
+        print(f"Orientation is now {state_str}{inv_str}.")
         
         if autofit:
             max_dim = ptty.fit(portrait)
-            print("Automatic resize of TTY to {} rows, {} columns".format(max_dim[1], max_dim[0]))
             ptty.set_tty_size(ptty.ttydev(vcsa), max_dim[1], max_dim[0])
             
-        # Wipe the buffers and clear the screen to force a clean rotated redraw
+        # Wipe the buffers and clear the screen to force a clean redraw
         oldbuff = None
         oldimage = None
         ptty.clear()
-
     # group the various params for readability
     textargs = {'portrait': portrait, 'flipx': flipx, 'flipy': flipy}
 
@@ -1381,7 +1391,7 @@ def terminal(settings, vcsa, font, fontsize, noclear, nocursor, cursor, sleep, t
                         ptty.driver.reset()
                         ptty.driver.init(partial=ptty.partial, vcom=self.vcom, enable_a2=self.enable_a2, enable_1bpp=self.enable_1bpp, mhz=self.mhz)
                 elif ch == 'p':
-                    set_portrait()
+                    set_orientation(not portrait, inverted)
             # if user or SIGUSR1 toggled the scrub flag, scrub display and start with a fresh image
             if flags['scrub_requested']:
                 # ptty.driver.scrub()
@@ -1402,27 +1412,18 @@ def terminal(settings, vcsa, font, fontsize, noclear, nocursor, cursor, sleep, t
                 # Ideally I would make this more configurable, eg add a flip x/y option somehow. For now hardcoded for my case
                 
                 # Y-Axis -> Portrait
-                if abs_y > 8.0 and abs_y > abs_x and abs_y > abs_z:
-                    set_portrait(True)
-                    # if accel_y > 0:
-                    #     orientation = "Portrait (Upright)"
-                    # else:
-                    #     orientation = "Portrait (Upside Down)"
-                # Z-Axis -> Now Landscape (Previously Flat)
-                elif abs_z > 8.0 and abs_z > abs_x and abs_z > abs_y:
-                    set_portrait(False)
-                    # if accel_z > 0:
-                    #     orientation = "Landscape (Right)"
-                    # else:
-                    #     orientation = "Landscape (Left)"
-                # X-Axis -> Now Flat (Previously Landscape)
-                # elif abs_x > 8.0 and abs_x > abs_y and abs_x > abs_z:
-                #     if accel_x > 0:
-                #         orientation = "Flat (Face Up)"
-                #     else:
-                #         orientation = "Flat (Face Down)"
-                # else:
-                #     orientation = "In Transition / Freefall"
+                if abs_y > 9.0 and abs_y > abs_x and abs_y > abs_z:
+                    if accel_y > 0:
+                        set_orientation(target_portrait=True, target_inverted=False)
+                    else:
+                        set_orientation(target_portrait=True, target_inverted=True)
+                        
+                # Z-Axis -> Landscape
+                elif abs_z > 9.0 and abs_z > abs_x and abs_z > abs_y:
+                    if accel_z > 0:
+                        set_orientation(target_portrait=False, target_inverted=False)
+                    else:
+                        set_orientation(target_portrait=False, target_inverted=True)
             
             
             with open(vcsa, 'rb') as f:
