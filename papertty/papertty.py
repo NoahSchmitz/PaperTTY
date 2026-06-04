@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+# Noah Schmitz, 2026
 # Colin Nolan, 2020
 # Jouko Strömmer, 2018
 # Copyright and related rights waived via CC0
@@ -20,6 +21,10 @@ import papertty.drivers.drivers_colordraw as drivers_colordraw
 import papertty.drivers.driver_it8951 as driver_it8951
 import papertty.drivers.drivers_4in2 as driver_4in2
 
+import time
+import board
+import adafruit_mpu6050
+
 # for ioctl
 import fcntl
 # for validating type of and access to device files
@@ -30,7 +35,6 @@ import signal
 import struct
 # for stdin and exit
 import sys
-import select
 # for setting TTY size
 import termios
 # for sleeping
@@ -41,10 +45,12 @@ import click
 from PIL import Image, ImageChops, ImageDraw, ImageFont, ImageOps
 # for tidy driver list
 from collections import OrderedDict
-# for VNC
-from vncdotool import api
 # for reading stdin data for use with Pillow
 from io import BytesIO
+
+# Initialize the I2C bus and the MPU6050 sensor
+i2c = board.I2C()  # Automatically defaults to GPIO 2 (SDA) and GPIO 3 (SCL)
+mpu = adafruit_mpu6050.MPU6050(i2c)
 
 # resource path
 RESOURCE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "resources")
@@ -1151,9 +1157,9 @@ def scrub(settings, size):
 @click.option('--flipx', default=False, is_flag=True, help='Flip X axis (EXPERIMENTAL/BROKEN)', show_default=False)
 @click.option('--flipy', default=False, is_flag=True, help='Flip Y axis (EXPERIMENTAL/BROKEN)', show_default=False)
 @click.option('--spacing', default='0', help='Line spacing for the text, "auto" to automatically determine a good value', show_default=True)
-@click.option('--scrub', 'apply_scrub', is_flag=True, default=False, help='Apply scrub when starting up',
-              show_default=True)
+@click.option('--scrub', 'apply_scrub', is_flag=True, default=False, help='Apply scrub when starting up', show_default=True)
 @click.option('--autofit', is_flag=True, default=False, help='Autofit terminal size to font size', show_default=True)
+@click.option('--autorotate', is_flag=True, default=False, help='Autorotate terminal based on adafruit_mpu6050 acceleration', show_default=True)
 @click.option('--attributes', is_flag=True, default=False, help='Use attributes', show_default=True)
 @click.option('--interactive', is_flag=True, default=False, help='Interactive mode')
 @click.option('--vcom', default=None, help='VCOM as positive value x 1000. eg. 1460 = -1.46V')
@@ -1162,7 +1168,7 @@ def scrub(settings, size):
 @click.option('--mhz', default=None, help='Set SPI speed in MHz')
 @click.pass_obj
 def terminal(settings, vcsa, font, fontsize, noclear, nocursor, cursor, sleep, ttyrows, ttycols, portrait, flipx, flipy,
-             spacing, apply_scrub, autofit, attributes, interactive, vcom, disable_a2, disable_1bpp, mhz):
+             spacing, apply_scrub, autofit, autorotate, attributes, interactive, vcom, disable_a2, disable_1bpp, mhz):
     """Display virtual console on an e-Paper display, exit with Ctrl-C."""
     settings.args['font'] = font
     settings.args['fontsize'] = fontsize
@@ -1231,6 +1237,35 @@ def terminal(settings, vcsa, font, fontsize, noclear, nocursor, cursor, sleep, t
 
     signal.signal(signal.SIGINT, sigint_handler)
     signal.signal(signal.SIGUSR1, sigusr1_handler)
+
+    def set_portrait(target_state=None):
+        """
+        Sets the display orientation. 
+        If target_state is None, it acts as a toggle.
+        """
+        nonlocal portrait, oldbuff, oldimage
+        
+        # If a specific state is passed, check if we are already in it
+        if target_state is not None:
+            if portrait == target_state:
+                return # We are already in this orientation, do nothing
+            portrait = target_state
+        else:
+            # If no state was passed, act as a simple toggle
+            portrait = not portrait
+            
+        textargs['portrait'] = portrait
+        print('Portrait mode is now {}.'.format('ON' if portrait else 'OFF'))
+        
+        if autofit:
+            max_dim = ptty.fit(portrait)
+            print("Automatic resize of TTY to {} rows, {} columns".format(max_dim[1], max_dim[0]))
+            ptty.set_tty_size(ptty.ttydev(vcsa), max_dim[1], max_dim[0])
+            
+        # Wipe the buffers and clear the screen to force a clean rotated redraw
+        oldbuff = None
+        oldimage = None
+        ptty.clear()
 
     # group the various params for readability
     textargs = {'portrait': portrait, 'flipx': flipx, 'flipy': flipy}
@@ -1326,7 +1361,8 @@ def terminal(settings, vcsa, font, fontsize, noclear, nocursor, cursor, sleep, t
                         ptty.driver.draw(0, 0, oldimage)
                         ptty.driver.reset()
                         ptty.driver.init(partial=ptty.partial, vcom=self.vcom, enable_a2=self.enable_a2, enable_1bpp=self.enable_1bpp, mhz=self.mhz)
-
+                elif ch == 'p':
+                    set_portrait()
             # if user or SIGUSR1 toggled the scrub flag, scrub display and start with a fresh image
             if flags['scrub_requested']:
                 # ptty.driver.scrub()
@@ -1336,6 +1372,39 @@ def terminal(settings, vcsa, font, fontsize, noclear, nocursor, cursor, sleep, t
                 oldimage = None
                 oldbuff = ''
                 flags['scrub_requested'] = False
+            
+            if autorotate:
+                accel_x, accel_y, accel_z = mpu.acceleration
+                abs_x = abs(accel_x)
+                abs_y = abs(accel_y)
+                abs_z = abs(accel_z)
+                
+                # NOTE: These numbers are obviously based on the orientation of the mpu-6050 relative to the device
+                # Ideally I would make this more configurable, eg add a flip x/y option somehow. For now hardcoded for my case
+                
+                # Y-Axis -> Portrait
+                if abs_y > 8.0 and abs_y > abs_x and abs_y > abs_z:
+                    set_portrait(True)
+                    # if accel_y > 0:
+                    #     orientation = "Portrait (Upright)"
+                    # else:
+                    #     orientation = "Portrait (Upside Down)"
+                # Z-Axis -> Now Landscape (Previously Flat)
+                elif abs_z > 8.0 and abs_z > abs_x and abs_z > abs_y:
+                    set_portrait(False)
+                    # if accel_z > 0:
+                    #     orientation = "Landscape (Right)"
+                    # else:
+                    #     orientation = "Landscape (Left)"
+                # X-Axis -> Now Flat (Previously Landscape)
+                # elif abs_x > 8.0 and abs_x > abs_y and abs_x > abs_z:
+                #     if accel_x > 0:
+                #         orientation = "Flat (Face Up)"
+                #     else:
+                #         orientation = "Flat (Face Down)"
+                # else:
+                #     orientation = "In Transition / Freefall"
+            
             
             with open(vcsa, 'rb') as f:
                 with open(vcsudev, 'rb') as vcsu:
@@ -1404,7 +1473,6 @@ def terminal(settings, vcsa, font, fontsize, noclear, nocursor, cursor, sleep, t
 cli.add_command(scrub)
 cli.add_command(terminal)
 cli.add_command(list_drivers)
-
 
 if __name__ == '__main__':
     cli()
